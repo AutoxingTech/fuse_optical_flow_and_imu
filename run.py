@@ -261,17 +261,21 @@ class Node:
         rqt_plot_node = roslaunch.Node(
             "rqt_plot",
             "rqt_plot",
-            args="/wheel_odom/pose/pose/position/y"
-            " /wheel_odom/twist/twist/linear/y"
-            " /optical_odom/pose/pose/position/y"
-            " /optical_odom/twist/covariance[0]"
-            " /optical_speed/twist/twist/linear/y"  # optical flow speed
-            " /imu/linear_acceleration/y"  #
-            # " /rpy/point/x"
-            " /predict_speed/twist/twist/linear/y"
-            " /predict_speed/twist/covariance[4]"
-            " /predict_pos/point/y"
-            " /speed_cov/point/y",
+            args=" ".join(
+                [
+                    "/wheel_odom/pose/pose/position/y",
+                    "/wheel_odom/twist/twist/linear/y",
+                    "/optical_odom/pose/pose/position/y",
+                    "/optical_odom/twist/covariance[0]",
+                    "/optical_speed/twist/twist/linear/y",  # optical flow speed
+                    "/imu/linear_acceleration/y",
+                    # "/rpy/point/x",
+                    "/predict_speed/twist/twist/linear/y",
+                    "/predict_speed/twist/covariance[4]",
+                    "/predict_pos/point/y",
+                    "/speed_cov/point/y",
+                ]
+            ),
             required=True,
         )
 
