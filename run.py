@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+from tkinter import SEL_FIRST
 import rospy
 import os
 import roslaunch
@@ -10,8 +11,9 @@ from sensor_msgs.msg import Imu
 from copy import deepcopy
 from geometry_msgs.msg import PointStamped, TwistWithCovarianceStamped
 import numpy as np
-from tf.transformations import quaternion_matrix
+from tf.transformations import quaternion_matrix, quaternion_conjugate, quaternion_inverse, quaternion_multiply, random_quaternion
 
+gravity = 9.8
 
 class OdomRelay:
     """
@@ -34,14 +36,23 @@ class OdomRelay:
             )
 
         self.__last_cov = None
+        self.__output_topic = output_topic
+        self.__position = PointStamped()
 
-    def odom_callback(self, data: Odometry):
+    def odom_callback(self, data: Odometry):    
         if self.__first_position == None:
             self.__first_position = data.pose.pose.position
 
         new_odom = deepcopy(data)
         new_odom.pose.pose.position.x -= self.__first_position.x
         new_odom.pose.pose.position.y -= self.__first_position.y
+        if self.__position.header.stamp != None:
+            dt = (data.header.stamp - self.__position.header.stamp).to_sec()
+            self.__position.point.x += dt * data.twist.twist.linear.x
+            self.__position.point.y += dt * data.twist.twist.linear.y
+        self.__position.header = data.header
+        if self.__output_topic == "/wheel_odom":
+            new_odom.pose.pose.position = self.__position.point
         self.__publisher.publish(new_odom)
 
         speed = TwistWithCovarianceStamped()
@@ -49,7 +60,7 @@ class OdomRelay:
 
         if self.__last_cov == None or data.twist.covariance[0] - self.__last_cov <= 0:
             # TODO: optical flow has bias, we should find a way to estimate it
-            bias = 0.93
+            bias = 1
             speed.twist.twist.linear.x = data.twist.twist.linear.x * bias
             speed.twist.twist.linear.y = data.twist.twist.linear.y * bias
         else:
@@ -85,6 +96,43 @@ def euler_from_quaternion(x, y, z, w):
 
     return roll_x, pitch_y, yaw_z  # in radians
 
+def correct_acc(quaternion, ori_acc):
+    # rotate local frame to earth frame: q.v.q*
+    q = quaternion
+    qc = quaternion_conjugate(q)
+    acc = [
+            ori_acc[0],
+            ori_acc[1],
+            ori_acc[2],
+            0
+        ]
+    t1 = quaternion_multiply(q, acc)
+    rotated_acc = quaternion_multiply(t1, qc)
+    # remove gravity
+    rotated_acc[2] -= gravity
+    # rotate earth frame to local frame: inv(q).v.(inv(q))*
+    q_inv = quaternion_inverse(q)
+    qc_inv = quaternion_conjugate(q_inv)
+    t1 = quaternion_multiply(q_inv, rotated_acc)
+    acc = quaternion_multiply(t1, qc_inv)
+    return acc[0:3]
+
+def correct_acc_with_matrix(quaternion, ori_acc):
+    matrix = quaternion_matrix(quaternion)
+    rotated_acc = matrix.dot(
+        [
+            ori_acc[0],
+            ori_acc[1],
+            ori_acc[2],
+            1
+        ]
+    )
+    # remove gravity
+    rotated_acc[2] -= gravity
+    matrix_inv = quaternion_matrix(quaternion_inverse(quaternion))
+    new_acc = matrix_inv.dot(rotated_acc)
+    return new_acc[0:3]
+
 
 class Node:
     def __init__(self) -> None:
@@ -103,39 +151,21 @@ class Node:
         kalman.statePost = np.zeros((4, 1))
 
         self.__time: rospy.Time = None
+        self.__publish_time : rospy.Time = None
 
     def __get_gravity_corrected_acc_and_rpy(self, imu: Imu):
-        # matrix = quaternion_matrix(
-        #     [
-        #         imu.orientation.x,
-        #         imu.orientation.y,
-        #         imu.orientation.z,
-        #         imu.orientation.w,
-        #     ]
-        # )
-        # acc = matrix.dot(
-        #     [
-        #         imu.linear_acceleration.x,
-        #         imu.linear_acceleration.y,
-        #         imu.linear_acceleration.z,
-        #         1,
-        #     ]
-        # )
-        acc = [
-            imu.linear_acceleration.x,
-            imu.linear_acceleration.y
-            + 0.13,  # TODO: acc has bias, we should find a way to estimate it
-            imu.linear_acceleration.z,
-        ]
+        quaternion = [imu.orientation.x, imu.orientation.y, imu.orientation.z, imu.orientation.w]
+        acc = [imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z]
+        acc = correct_acc(quaternion, acc)
 
         r, p, y = euler_from_quaternion(
             imu.orientation.x, imu.orientation.y, imu.orientation.z, imu.orientation.w
         )
         rpy = PointStamped()
         rpy.header = imu.header
-        rpy.point.x = r
-        rpy.point.y = p
-        rpy.point.z = y
+        rpy.point.x = math.degrees(r)
+        rpy.point.y = math.degrees(p)
+        rpy.point.z = math.degrees(y)
 
         return acc, rpy
 
@@ -155,7 +185,7 @@ class Node:
         self.__roll_publisher.publish(rpy)
 
         # correct
-        cov = 0.25 / 2
+        cov = 0.1
         kalman.measurementNoiseCov = np.array(
             [
                 [cov * cov, 0],
@@ -241,10 +271,17 @@ class Node:
         speed.twist.covariance[1 * 3 + 1] = math.sqrt(errorCovPost[1][1])
         self.__predict_publisher.publish(speed)
 
+        now = rospy.Time.now()
+        if self.__publish_time == None:
+            self.__publish_time = now
+            return
+        dt = (now - self.__publish_time).to_sec()
+        self.__publish_time = now
+
         # publish position
         self._predict_pos.header = header
-        self._predict_pos.point.x += vx * 0.01
-        self._predict_pos.point.y += vy * 0.01
+        self._predict_pos.point.x += vx * dt
+        self._predict_pos.point.y += vy * dt
         self.__predict_pos_publisher.publish(self._predict_pos)
 
     def run(self):
@@ -269,9 +306,11 @@ class Node:
                     "/optical_odom/twist/covariance[0]",
                     "/optical_speed/twist/twist/linear/y",  # optical flow speed
                     "/imu/linear_acceleration/y",
-                    # "/rpy/point/x",
+                    "/rpy/point/x",
+                    "/rpy/point/y",
+                    # "/rpy/point/z",
                     "/predict_speed/twist/twist/linear/y",
-                    "/predict_speed/twist/covariance[4]",
+                    # "/predict_speed/twist/covariance[4]",
                     "/predict_pos/point/y",
                     "/speed_cov/point/y",
                 ]
@@ -281,6 +320,7 @@ class Node:
 
         rosbag_node = roslaunch.Node(
             "rosbag", "play", args=f"{os.getcwd()}/test_2022-06-22-18-07-35.bag"
+            # "rosbag", "play", args=f"{os.getcwd()}/po2.bag"
         )
 
         launch = roslaunch.scriptapi.ROSLaunch()
@@ -293,6 +333,17 @@ class Node:
 def main():
     node = Node()
     node.run()
+
+def test():
+    for i in range(1, 10):
+        q = random_quaternion()
+        v = np.random.random(3)
+        v1 = correct_acc(q, v)
+        v2 = correct_acc_with_matrix(q, v)
+        if not np.allclose(v1, v):
+            print(f"not close {v1}  {v}")
+        if not np.allclose(v2, v):
+            print(f"not close {v2}  {v}")    
 
 
 if __name__ == "__main__":
