@@ -124,7 +124,7 @@ def correct_acc_with_matrix(quaternion, ori_acc):
             ori_acc[0],
             ori_acc[1],
             ori_acc[2],
-            1
+            0
         ]
     )
     # remove gravity
@@ -335,16 +335,13 @@ def main():
     node.run()
 
 def test():
-    for i in range(1, 10):
+    for i in range(1, 1000):
         q = random_quaternion()
         v = np.random.random(3)
         v1 = correct_acc(q, v)
         v2 = correct_acc_with_matrix(q, v)
-        if not np.allclose(v1, v):
+        if not np.allclose(v1, v2):
             print(f"not close {v1}  {v}")
-        if not np.allclose(v2, v):
-            print(f"not close {v2}  {v}")    
-
 
 if __name__ == "__main__":
     main()
